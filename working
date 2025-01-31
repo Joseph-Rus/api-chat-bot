@@ -1,0 +1,241 @@
+import os
+import sys
+import threading
+import base64
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+                               QTextEdit, QLineEdit, QPushButton, QLabel, QDialog,
+                               QComboBox, QMessageBox, QFrame, QFileDialog)
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QTextCursor, QPixmap, QIcon, QGuiApplication
+from dotenv import load_dotenv
+from openai import OpenAI
+
+# Modern dark theme colors
+COLOR_PALETTE = {
+    "background": "#2D2D2D",
+    "text": "#FFFFFF",
+    "input_bg": "#404040",
+    "button_bg": "#4A4A4A",
+    "button_hover": "#5A5A5A",
+    "border": "#404040"
+}
+
+def assign_role(user_input):
+    """Dynamically assigns a role based on user input."""
+    if "math" in user_input.lower():
+        return "math_tutor"
+    elif "code" in user_input.lower() or "debug" in user_input.lower():
+        return "coding_mentor"
+    elif "algorithm" in user_input.lower():
+        return "algorithm_expert"
+    elif "proof" in user_input.lower():
+        return "theorem_prover"
+    else:
+        return "general_assistant"
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.api_key = parent.api_key if parent else ""
+        self.model = parent.model if parent else "gpt-4-vision-preview"
+        self.setup_ui()
+
+    def setup_ui(self):
+        self.setWindowTitle("Settings")
+        self.setModal(True)
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("OpenAI API Key:"))
+        self.api_key_input = QLineEdit(self.api_key)
+        layout.addWidget(self.api_key_input)
+
+        layout.addWidget(QLabel("Model:"))
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(["gpt-4-vision-preview", "gpt-4", "gpt-4o", "gpt-3.5-turbo"])
+        self.model_combo.setCurrentText(self.model)
+        layout.addWidget(self.model_combo)
+
+        button_layout = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(save_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+    def accept(self):
+        self.api_key = self.api_key_input.text()
+        self.model = self.model_combo.currentText()
+        super().accept()
+
+class ChatWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.current_images = []
+        self.message_history = []
+        self.setup_ui()
+        self.load_env()
+        self.client = None
+        self.initialize_client()
+
+    def setup_ui(self):
+        self.setWindowTitle("AI Chat Client")
+        self.setGeometry(100, 100, 600, 600)
+
+        base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+
+        icon_path = os.path.join(base_path, "mainicon.ico")
+        file_icon_path = os.path.join(base_path, "mainfile.ico")
+        settings_icon_path = os.path.join(base_path, "mainsettings.ico")
+
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        layout = QVBoxLayout(main_widget)
+        layout.setContentsMargins(10, 10, 10, 1)
+
+        self.chat_history = QTextEdit()
+        self.chat_history.setReadOnly(True)
+        layout.addWidget(self.chat_history)
+
+        input_frame = QFrame()
+        input_layout = QHBoxLayout(input_frame)
+
+        self.image_btn = QPushButton()
+        self.image_btn.setFixedSize(40, 40)
+        if os.path.exists(file_icon_path):
+            self.image_btn.setIcon(QIcon(file_icon_path))
+        self.image_btn.clicked.connect(self.upload_image)
+
+        self.settings_btn = QPushButton()
+        self.settings_btn.setFixedSize(40, 40)
+        if os.path.exists(settings_icon_path):
+            self.settings_btn.setIcon(QIcon(settings_icon_path))
+        self.settings_btn.clicked.connect(self.open_settings)
+
+        self.user_input = QLineEdit()
+        self.user_input.returnPressed.connect(self.send_message)
+
+        self.send_btn = QPushButton("Send")
+        self.send_btn.clicked.connect(self.send_message)
+
+        input_layout.addWidget(self.image_btn)
+        input_layout.addWidget(self.settings_btn)
+        input_layout.addWidget(self.user_input)
+        input_layout.addWidget(self.send_btn)
+        layout.addWidget(input_frame)
+
+    def load_env(self):
+        load_dotenv()
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.model = os.getenv("MODEL")
+
+    def save_env(self):
+        with open(".env", "w") as env_file:
+            env_file.write(f"OPENAI_API_KEY={self.api_key}\n")
+            env_file.write(f"MODEL={self.model}\n")
+
+    def initialize_client(self):
+        if not self.api_key or not self.model:
+            self.open_settings()
+            return
+        self.client = OpenAI(api_key=self.api_key)
+
+    def open_settings(self):
+        dialog = SettingsDialog(self)
+        if dialog.exec():
+            self.api_key = dialog.api_key
+            self.model = dialog.model
+            self.save_env()
+            self.initialize_client()
+
+    def upload_image(self):
+        file_dialog = QFileDialog()
+        file_dialog.setNameFilter("Images (*.png *.jpg *.jpeg *.gif *.bmp)")
+        if file_dialog.exec():
+            file_paths = file_dialog.selectedFiles()
+            for path in file_paths:
+                self.current_images.append(path)
+                self.show_image_preview(path)
+
+    def show_image_preview(self, image_path):
+        pixmap = QPixmap(image_path)
+        if not pixmap.isNull():
+            self.chat_history.append(f"Image uploaded: {image_path}")
+        else:
+            QMessageBox.warning(self, "Error", "Failed to load image.")
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_V and (event.modifiers() & Qt.ControlModifier):
+            clipboard = QGuiApplication.clipboard()
+            mime_data = clipboard.mimeData()
+
+            if mime_data.hasImage():
+                pixmap = clipboard.pixmap()
+                if not pixmap.isNull():
+                    temp_image_path = "clipboard_image.png"
+                    pixmap.save(temp_image_path, "PNG")
+                    self.current_images.append(temp_image_path)
+                    self.show_image_preview(temp_image_path)
+
+    def send_message(self):
+        user_message = self.user_input.text().strip()
+        if not user_message and not self.current_images:
+            return
+
+        if not self.client:
+            QMessageBox.warning(self, "Error", "Please configure your API key in settings first.")
+            return
+
+        self.chat_history.append(f"\n>> {user_message}")
+        self.user_input.clear()
+
+        content = [{"type": "text", "text": user_message}] if user_message else []
+
+        for image_path in self.current_images:
+            try:
+                with open(image_path, "rb") as image_file:
+                    base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+                    content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}})
+            except Exception as e:
+                self.chat_history.append(f"Error processing image {image_path}: {str(e)}")
+
+        self.current_images.clear()
+        threading.Thread(target=self.send_message_thread, args=(content,)).start()
+
+    def send_message_thread(self, content):
+        user_message = " ".join(item["text"] for item in content if item["type"] == "text")
+
+        self.message_history.append({"role": "user", "content": content})
+
+        if len(self.message_history) > 20:
+            self.message_history = self.message_history[-20:]
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=self.message_history,
+                max_tokens=1000
+            )
+            response_text = response.choices[0].message.content
+
+            role = assign_role(user_message)
+
+            self.message_history.append({"role": role, "content": response_text})
+
+            self.chat_history.append(f"\n>> {response_text}\n")
+            self.chat_history.moveCursor(QTextCursor.End)
+        except Exception as e:
+            self.chat_history.append(f"\nError: {str(e)}\n")
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = ChatWindow()
+    window.show()
+    if not window.api_key or not window.model:
+        window.open_settings()
+    sys.exit(app.exec())
+
